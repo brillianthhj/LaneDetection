@@ -1,5 +1,7 @@
 #include <iostream>
 #include <fstream>
+#include <cmath>
+#include <cstdlib>
 #include "opencv2/opencv.hpp"
 
 enum Direction : uint8_t
@@ -9,13 +11,13 @@ enum Direction : uint8_t
 	RIGHT = 1
 };
 
-int32_t findEdges(const cv::Mat& img, Direction direction);
+int32_t findEdges(cv::Mat& img, Direction direction);
 void drawCross(cv::Mat& img, cv::Point pt, cv::Scalar color);
 
 int main()
 {
     cv::VideoCapture cap;
-    bool flag = cap.open("/home/hyejin/Playground/LaneDetection/resource/SubProject01.avi");
+    bool flag = cap.open("/home/hyejin/Playground/LaneDetection/resource/problem01.avi");
 
 	if (!cap.isOpened())
 	{
@@ -41,7 +43,7 @@ int main()
 	fout.open("/home/hyejin/Playground/LaneDetection/coordinates.csv", std::ios::out);
 	fout << "#coord_left" << "," << "#coord_right" << "\n";
 	
-	constexpr int32_t offset = 400;
+	constexpr int32_t offset = 360;
 	constexpr int32_t rectHeight = 20;
 	const auto rectWidth = static_cast<int32_t>(width * 0.5);
 	constexpr int32_t padding = 12;
@@ -74,9 +76,12 @@ int main()
 		std::cout << "frame is running." << std::endl;
 
 		// get points
-		cvtColor(frame, gray, cv::COLOR_BGR2GRAY);
-		int32_t ptsLeft = findEdges(gray(rectLeft), Direction::LEFT) - padding;
-		int32_t ptsRight = findEdges(gray(rectRight), Direction::RIGHT) + rectWidth + padding;
+
+		cv::Mat roiLeft(frame(rectLeft));
+		cv::Mat roiRight(frame(rectRight));
+
+		int32_t ptsLeft = findEdges(roiLeft, Direction::LEFT) - padding;
+		int32_t ptsRight = findEdges(roiRight, Direction::RIGHT) + rectWidth + padding;
 
 /*
 		// if (first) 
@@ -105,10 +110,10 @@ int main()
 */
 
 		// predict
-		if (ptsLeft < 0)
+		if (ptsLeft <= 0)
 			ptsLeft = improved.at<float>(0);
 		
-		if (ptsRight > 640)
+		if (ptsRight >= 640)
 			ptsRight = improved.at<float>(1);
 		
 		measurement.at<float>(0) = ptsLeft;
@@ -135,6 +140,7 @@ int main()
 
 		// draw ractangle
 		rectangle(frame, cv::Rect(0, offset-10, rectWidth * 2, rectHeight), cv::Scalar(0, 0, 255), 2);
+		rectangle(frame, cv::Rect(rectWidth-5, offset-5, 10, 10), cv::Scalar(0, 255, 0), 2);
 		
 		// write csv
 		fout << xLeft << "," << xRight << "\n";
@@ -153,24 +159,36 @@ int main()
   
 }
 
-int32_t findEdges(const cv::Mat& img, Direction direction)
+int32_t findEdges(cv::Mat& img, Direction direction)
 {
-	cv::Mat fimg, blr, dy;
-	img.convertTo(fimg, CV_32F);
+	cv::Mat gray, fimg, blr, dy, debugging;
+	cvtColor(img, gray, cv::COLOR_BGR2GRAY);
+	gray.convertTo(fimg, CV_32F);
 	GaussianBlur(fimg, blr, cv::Size(), 1.);
 	Sobel(blr, dy, CV_32F, 0, 1);
 	cv::Mat kernel = getStructuringElement(cv::MORPH_RECT, cv::Size(3,3));
 	morphologyEx(dy, dy, cv::MORPH_CLOSE, kernel);
 
-	double maxValue;
-	cv::Point maxLoc;
+	double minValue, maxValue;
+	cv::Point minLoc, maxLoc;
 
 	int32_t halfY = fimg.rows/2;
 	cv::Mat roi = dy.row(halfY);
-	minMaxLoc(roi, NULL, &maxValue, NULL, &maxLoc);
+	minMaxLoc(roi, &minValue, &maxValue, &minLoc, &maxLoc);
+
+#if 1
+	// debug
+	GaussianBlur(gray, debugging, cv::Size(), 1.);
+	Sobel(debugging, debugging, -1, 0, 1);
+	morphologyEx(debugging, debugging, cv::MORPH_CLOSE, kernel);
+	cvtColor(debugging, debugging, cv::COLOR_GRAY2BGR);
+	debugging.copyTo(img);
+
+#endif
 
 	int32_t threshold = 90;
-	int32_t xCoord = (maxValue > threshold) ? maxLoc.x : (direction == Direction::LEFT) ? 0 : 320;
+	int32_t interval = 40;
+	int32_t xCoord = (maxValue > threshold && std::abs(minLoc.x-maxLoc.x) < interval) ? maxLoc.x : (direction == Direction::LEFT) ? 0 : 320;
 
 	return xCoord;
 }
