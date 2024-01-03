@@ -2,13 +2,17 @@
 #include <fstream>
 #include <cmath>
 #include <cstdlib>
+#include <numeric>
 #include "opencv2/opencv.hpp"
+
+#define USE_SOBEL 1
+#define USE_HOUGH 0
 
 enum Direction : uint8_t
 {
-	// lane direction
-	LEFT = 0,
-	RIGHT = 1
+    // lane direction
+    LEFT = 0,
+    RIGHT = 1
 };
 
 int32_t findEdges(cv::Mat& img, Direction direction);
@@ -17,185 +21,185 @@ void drawCross(cv::Mat& img, cv::Point pt, cv::Scalar color);
 int main()
 {
     cv::VideoCapture cap;
-    bool flag = cap.open("/home/hyejin/Playground/LaneDetection/resource/problem01.avi");
+    bool flag = cap.open("../resource/SubProject01.avi");
 
-	if (!cap.isOpened())
-	{
-		std::cout << "Can't open video!!" << std::endl;
-		return -1;
-	}
+    if (!cap.isOpened())
+    {
+        std::cout << "Can't open video!!" << std::endl;
+        return -1;
+    }
 
-	int32_t width = cvRound(cap.get(cv::CAP_PROP_FRAME_WIDTH));
-	int32_t height = cvRound(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
+    int32_t width = cvRound(cap.get(cv::CAP_PROP_FRAME_WIDTH));
+    int32_t height = cvRound(cap.get(cv::CAP_PROP_FRAME_HEIGHT));
 
     //int  fourcc = VideoWriter::fourcc('X', 'V', 'I', 'D');
     int32_t  fourcc = cv::VideoWriter::fourcc('M', 'J', 'P', 'G');
-	double fps = cap.get(cv::CAP_PROP_FPS);
+    double fps = cap.get(cv::CAP_PROP_FPS);
     cv::Size size(width, height);
 
-    cv::VideoWriter output("/home/hyejin/Playground/LaneDetection/output01.avi", fourcc, fps, size);
+    cv::VideoWriter output("../result/output01.avi", fourcc, fps, size);
 
-	int32_t delay = cvRound(1000 / fps);
-	cv::Mat frame, dx, dy, edge, gray;
+    int32_t delay = cvRound(1000 / fps);
+    cv::Mat frame, dx, dy, edge, gray;
 
-	// csv writer setting
-	std::fstream fout;
-	fout.open("/home/hyejin/Playground/LaneDetection/coordinates.csv", std::ios::out);
-	fout << "#coord_left" << "," << "#coord_right" << "\n";
-	
-	constexpr int32_t offset = 360;
-	constexpr int32_t rectHeight = 20;
-	const auto rectWidth = static_cast<int32_t>(width * 0.5);
-	constexpr int32_t padding = 12;
+    // csv writer setting
+    std::fstream fout;
+    fout.open("../result/coordinates.csv", std::ios::out);
+    fout << "#coord_left" << "," << "#coord_right" << "\n";
 
-	// left, right rectangles
-	cv::Rect rectLeft(0, offset-10, rectWidth, rectHeight);
-	cv::Rect rectRight(rectWidth, offset-10, rectWidth, rectHeight);
+    constexpr int32_t offset = 400;
+    constexpr int32_t rectHeight = 20;
+    const auto rectWidth = static_cast<int32_t>(width * 0.5);
+    constexpr int32_t padding = 12;
 
-	// kalman filter configs
-	cv::KalmanFilter KF(4, 2, 0);
-    // cv::Mat state(4, 1, CV_32F);
+    // left, right rectangles
+    cv::Rect rectLeft(0, offset-10, rectWidth, rectHeight);
+    cv::Rect rectRight(rectWidth, offset-10, rectWidth, rectHeight);
+
+    // kalman filter configs
+    cv::KalmanFilter KF(4, 2, 0);
     cv::Mat processNoise(4, 1, CV_32F);
     cv::Mat measurement = cv::Mat::zeros(2, 1, CV_32F);
-	cv::Mat improved(4, 1, CV_32F);
+    cv::Mat improved(4, 1, CV_32F);
 
-	KF.transitionMatrix = (cv::Mat_<float>(4, 4) << 1,0,1,0, 0,1,0,1, 0,0,1,0, 0,0,0,1);
-	setIdentity(KF.measurementMatrix);
-	setIdentity(KF.processNoiseCov, cv::Scalar::all(1e-4));
-	setIdentity(KF.measurementNoiseCov, cv::Scalar::all(1e-1));
-	setIdentity(KF.errorCovPost, cv::Scalar::all(1));
-	randn(KF.statePost, cv::Scalar::all(0), cv::Scalar::all(0.1));
+    KF.transitionMatrix = (cv::Mat_<float>(4, 4) << 1,0,1,0, 0,1,0,1, 0,0,1,0, 0,0,0,1);
+    setIdentity(KF.measurementMatrix);
+    setIdentity(KF.processNoiseCov, cv::Scalar::all(1e-4));
+    setIdentity(KF.measurementNoiseCov, cv::Scalar::all(1e-1));
+    setIdentity(KF.errorCovPost, cv::Scalar::all(1));
+    randn(KF.statePost, cv::Scalar::all(0), cv::Scalar::all(0.1));
 
-	bool first = true;
+    bool first = true;
 
-	while (true) {
-		cap >> frame;
-		if (frame.empty())
-			break;
+    while (true) {
+        cap >> frame;
+        if (frame.empty())
+            break;
 
-		std::cout << "frame is running." << std::endl;
+        std::cout << "frame is running." << std::endl;
 
-		// get points
+        cv::Mat roiLeft(frame(rectLeft));
+        cv::Mat roiRight(frame(rectRight));
 
-		cv::Mat roiLeft(frame(rectLeft));
-		cv::Mat roiRight(frame(rectRight));
+        // find pts left & right
+        int32_t ptsLeft = findEdges(roiLeft, Direction::LEFT) - padding;
+        int32_t ptsRight = findEdges(roiRight, Direction::RIGHT) + rectWidth + padding;
 
-		int32_t ptsLeft = findEdges(roiLeft, Direction::LEFT) - padding;
-		int32_t ptsRight = findEdges(roiRight, Direction::RIGHT) + rectWidth + padding;
+        // predict
+        if (ptsLeft < 0)
+            ptsLeft = improved.at<float>(0);
 
-/*
-		// if (first) 
-		// {
-		state.at<float>(0) = ptsLeft;
-		state.at<float>(1) = ptsRight;
-		state.at<float>(2) = 0.f;
-		state.at<float>(3) = 0.f;
-			first = false;
-		// }
+        if (ptsRight > 640)
+            ptsRight = improved.at<float>(1);
 
-		// kalman pred
-		// cv::Mat prediction = KF.predict();
+        measurement.at<float>(0) = ptsLeft;
+        measurement.at<float>(1) = ptsRight;
 
-		// generate measurement
-		// randn(measurement, cv::Scalar::all(0), cv::Scalar::all(KF.measurementNoiseCov.at<float>(0)));
-		// measurement += KF.measurementMatrix*state;
+        KF.correct(measurement);
+        improved = KF.predict();
 
-		// correct the state estimates based on measurements
-		// updates statePost & errorCovPost
-		KF.correct(measurement);
-		cv::Mat improved = KF.statePost;
+        // draw left cross
+        int32_t xLeft = (ptsLeft > 0) ? ptsLeft : 0;
+        drawCross(frame, cv::Point(xLeft, offset), cv::Scalar(0, 0, 255));
+        putText(frame, cv::format("(%d, %d)", xLeft, offset),
+                cv::Point(xLeft - 50, offset - 20),
+                cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 255), 1, cv::LINE_AA);
 
-		// forecast point
-		cv::Mat forecast = KF.transitionMatrix*KF.statePost;
-*/
+        // draw right cross
+        int32_t xRight = (ptsRight < 640) ? ptsRight : 640;
+        drawCross(frame, cv::Point(xRight, offset), cv::Scalar(0, 0, 255));
+        putText(frame, cv::format("(%d, %d)", xRight, offset),
+                cv::Point(xRight - 50, offset - 20),
+                cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 255), 1, cv::LINE_AA);
 
-		// predict
-		if (ptsLeft <= 0)
-			ptsLeft = improved.at<float>(0);
-		
-		if (ptsRight >= 640)
-			ptsRight = improved.at<float>(1);
-		
-		measurement.at<float>(0) = ptsLeft;
-		measurement.at<float>(1) = ptsRight;
+        // draw ractangle
+        rectangle(frame, cv::Rect(0, offset-10, rectWidth * 2, rectHeight), cv::Scalar(0, 0, 255), 2);
+        //rectangle(frame, cv::Rect(rectWidth-5, offset-5, 10, 10), cv::Scalar(0, 255, 0), 2);
 
-		KF.correct(measurement);
-		improved = KF.predict();
-		//improved = KF.transitionMatrix*KF.statePost;
+        // write csv
+        fout << xLeft << "," << xRight << "\n";
 
+        output << frame;
+    }
+    fout.close();
+    std::cout << "out of bracket" << std::endl;
 
-		// draw left cross
-		int32_t xLeft = (ptsLeft > 0) ? ptsLeft : 0;
-		drawCross(frame, cv::Point(xLeft, offset), cv::Scalar(0, 0, 255));
-		putText(frame, cv::format("(%d, %d)", xLeft, offset),
-			cv::Point(xLeft - 50, offset - 20),
-			cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 255), 1, cv::LINE_AA);
-
-		// draw right cross
-		int32_t xRight = (ptsRight < 640) ? ptsRight : 640;
-		drawCross(frame, cv::Point(xRight, offset), cv::Scalar(0, 0, 255));
-		putText(frame, cv::format("(%d, %d)", xRight, offset),
-			cv::Point(xRight - 50, offset - 20),
-			cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 255), 1, cv::LINE_AA);
-
-		// draw ractangle
-		rectangle(frame, cv::Rect(0, offset-10, rectWidth * 2, rectHeight), cv::Scalar(0, 0, 255), 2);
-		rectangle(frame, cv::Rect(rectWidth-5, offset-5, 10, 10), cv::Scalar(0, 255, 0), 2);
-		
-		// write csv
-		fout << xLeft << "," << xRight << "\n";
-
-		output << frame;
-
-		// update kalman state
-		// randn( processNoise, cv::Scalar(0), cv::Scalar::all(sqrt(KF.processNoiseCov.at<float>(0, 0))));
-		// state = KF.transitionMatrix*state + processNoise;
-	}
-	fout.close();
-	std::cout << "out of bracket" << std::endl;
-
-	output.release();
-	cap.release();
-  
+    output.release();
+    cap.release();
 }
 
 int32_t findEdges(cv::Mat& img, Direction direction)
 {
-	cv::Mat gray, fimg, blr, dy, debugging;
-	cvtColor(img, gray, cv::COLOR_BGR2GRAY);
-	gray.convertTo(fimg, CV_32F);
-	GaussianBlur(fimg, blr, cv::Size(), 1.);
-	Sobel(blr, dy, CV_32F, 0, 1);
-	cv::Mat kernel = getStructuringElement(cv::MORPH_RECT, cv::Size(3,3));
-	morphologyEx(dy, dy, cv::MORPH_CLOSE, kernel);
+#if USE_SOBEL	// Using sobel algorithm
 
-	double minValue, maxValue;
-	cv::Point minLoc, maxLoc;
+    cv::Mat gray, fimg, blr, dy, debugging;
+    cvtColor(img, gray, cv::COLOR_BGR2GRAY);
+    gray.convertTo(fimg, CV_32F);
+    GaussianBlur(fimg, blr, cv::Size(), 1.);
+    Sobel(blr, dy, CV_32F, 0, 1);
+    cv::Mat kernel = getStructuringElement(cv::MORPH_RECT, cv::Size(3,3));
+    morphologyEx(dy, dy, cv::MORPH_CLOSE, kernel);
 
-	int32_t halfY = fimg.rows/2;
-	cv::Mat roi = dy.row(halfY);
-	minMaxLoc(roi, &minValue, &maxValue, &minLoc, &maxLoc);
+    double minValue, maxValue;
+    cv::Point minLoc, maxLoc;
 
-#if 1
-	// debug
-	GaussianBlur(gray, debugging, cv::Size(), 1.);
-	Sobel(debugging, debugging, -1, 0, 1);
-	morphologyEx(debugging, debugging, cv::MORPH_CLOSE, kernel);
-	cvtColor(debugging, debugging, cv::COLOR_GRAY2BGR);
-	debugging.copyTo(img);
+    int32_t halfY = fimg.rows/2;
+    cv::Mat roi = dy.row(halfY);
+    minMaxLoc(roi, &minValue, &maxValue, &minLoc, &maxLoc);
+
+    int32_t threshold = 90;
+    int32_t interval = 40;
+
+    int32_t xCoord = (maxValue > threshold) ? maxLoc.x : (direction == Direction::LEFT) ? 0 : 320;
+
+#elif USE_HOUGH		// Using hough transform
+
+    cv::Mat gray, hough;
+    cvtColor(img, gray, cv::COLOR_BGR2GRAY);
+    GaussianBlur(gray, hough, cv::Size(), 1.);
+    Canny(hough, hough, 180, 250);
+    std::vector<cv::Vec4i> lines;
+    HoughLinesP(hough, lines, 1, CV_PI / 180, 10, 10, 250);
+
+    double minValue, maxValue;
+    cv::Point minLoc, maxLoc;
+
+    int32_t halfY = hough.rows/2;
+    cv::Mat roi = hough.row(halfY);
+    minMaxLoc(roi, &minValue, &maxValue, &minLoc, &maxLoc);
+
+    cvtColor(hough, hough, cv::COLOR_GRAY2BGR);
+    std::vector<double> filteredX;
+    for (size_t i = 0; i < lines.size(); i++) {
+        cv::Vec4i l = lines[i];
+        double angle = std::atan2(l[3]-l[1], l[2]-l[0]) * 180.0 / CV_PI;
+        double slope = 1.0 * (l[3]-l[1]) / (l[2]-l[0]);
+        if (std::abs(angle) >= 15 && std::abs(angle) <= 150)
+        {
+            double x = (halfY-l[1])/slope + l[0];
+            filteredX.push_back(x);
+            line(hough,
+                 cv::Point(l[0], l[1]), cv::Point(l[2], l[3]),
+                 cv::Scalar(0, 0, 255), 2,
+                 cv::LINE_AA);
+        }
+    }
+    double sum = std::accumulate(filteredX.begin(), filteredX.end(), 0.0);
+    double mean = sum / filteredX.size();
+
+    // hough.copyTo(img);
+
+    int32_t xCoord = static_cast<int32_t>(mean);
 
 #endif
 
-	int32_t threshold = 90;
-	int32_t interval = 40;
-	int32_t xCoord = (maxValue > threshold && std::abs(minLoc.x-maxLoc.x) < interval) ? maxLoc.x : (direction == Direction::LEFT) ? 0 : 320;
-
-	return xCoord;
+    return xCoord;
 }
+
 
 void drawCross(cv::Mat& img, cv::Point pt, cv::Scalar color)
 {
-	int32_t span = 5;
-	line(img, pt + cv::Point(-span, -span), pt + cv::Point(span, span), color, 1, cv::LINE_AA);
-	line(img, pt + cv::Point(-span, span), pt + cv::Point(span, -span), color, 1, cv::LINE_AA);
+    int32_t span = 5;
+    line(img, pt + cv::Point(-span, -span), pt + cv::Point(span, span), color, 1, cv::LINE_AA);
+    line(img, pt + cv::Point(-span, span), pt + cv::Point(span, -span), color, 1, cv::LINE_AA);
 }
